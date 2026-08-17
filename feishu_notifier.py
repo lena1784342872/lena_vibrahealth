@@ -10,7 +10,7 @@ import hmac
 import hashlib
 import base64
 
-# ---------- 签名计算函数 ----------
+
 def gen_sign(timestamp, secret):
     """生成飞书机器人签名"""
     string_to_sign = '{}\n{}'.format(timestamp, secret)
@@ -20,6 +20,7 @@ def gen_sign(timestamp, secret):
     ).digest()
     sign = base64.b64encode(hmac_code).decode('utf-8')
     return sign
+
 
 def parse_junit_xml(xml_file):
     """解析 JUnit XML 文件，提取测试结果统计及失败详情"""
@@ -36,7 +37,10 @@ def parse_junit_xml(xml_file):
     skipped = 0
     failed_cases = []
 
-    for suite in root.findall('testsuite'):
+    # ✅ 兼容 testsuites（根）和 testsuite（根）两种格式
+    suites = root.findall('testsuite') if root.tag == 'testsuites' else [root]
+
+    for suite in suites:
         total += int(suite.get('tests', 0))
         failures += int(suite.get('failures', 0))
         errors += int(suite.get('errors', 0))
@@ -50,21 +54,16 @@ def parse_junit_xml(xml_file):
                 name = case.get('name', '')
                 failure_type = 'failure' if failure_elem is not None else 'error'
 
-                # 安全获取 message
                 if failure_elem is not None:
                     message = failure_elem.get('message', '无详细信息')
-                elif error_elem is not None:
-                    message = error_elem.get('message', '无详细信息')
                 else:
-                    message = '无详细信息'
+                    message = error_elem.get('message', '无详细信息')
 
-                # 添加到 failed_cases 列表（你之前漏掉了这一部分）
                 failed_cases.append({
                     'name': f"{classname}.{name}" if classname else name,
                     'type': failure_type,
                     'message': message
                 })
-
 
     passed = total - failures - errors - skipped
     return {
@@ -76,14 +75,12 @@ def parse_junit_xml(xml_file):
         'failed_cases': failed_cases
     }
 
+
 def send_feishu_message(webhook_url, secret, stats, report_url=""):
     """发送带签名的结构化卡片消息到飞书"""
     if not webhook_url:
         print("未配置飞书 Webhook URL，跳过通知")
         return
-
-    timestamp = str(int(time.time()))
-    sign = gen_sign(timestamp, secret)
 
     status_color = "green" if stats['failures'] == 0 and stats['errors'] == 0 else "red"
     status_text = "✅ 测试全部通过" if status_color == "green" else "❌ 测试未完全通过"
@@ -93,7 +90,9 @@ def send_feishu_message(webhook_url, secret, stats, report_url=""):
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": f"**总数:** {stats['total']}  |  **✅ 通过:** {stats['passed']}  |  **❌ 失败:** {stats['failures']}  |  **⚠️ 错误:** {stats['errors']}  |  **⏭️ 跳过:** {stats['skipped']}"
+                "content": f"**总数:** {stats['total']}  |  **✅ 通过:** {stats['passed']}  |  "
+                           f"**❌ 失败:** {stats['failures']}  |  **⚠️ 错误:** {stats['errors']}  |  "
+                           f"**⏭️ 跳过:** {stats['skipped']}"
             }
         },
         {"tag": "hr"}
@@ -128,10 +127,7 @@ def send_feishu_message(webhook_url, secret, stats, report_url=""):
             ]
         })
 
-    # 关键修正：在根对象中包含 timestamp 和 sign
     payload = {
-        "timestamp": timestamp,
-        "sign": sign,
         "msg_type": "interactive",
         "card": {
             "config": {"wide_screen_mode": True},
@@ -143,23 +139,38 @@ def send_feishu_message(webhook_url, secret, stats, report_url=""):
         }
     }
 
+    # ✅ 仅当 secret 非空时才添加签名
+    if secret:
+        timestamp = str(int(time.time()))
+        sign = gen_sign(timestamp, secret)
+        payload["timestamp"] = timestamp
+        payload["sign"] = sign
+
     try:
         response = requests.post(webhook_url, json=payload, timeout=10)
         response.raise_for_status()
-        print("飞书通知发送成功")
+        # ✅ 检查飞书业务状态码
+        result = response.json()
+        if result.get("code") != 0:
+            print(f"飞书通知发送失败: code={result.get('code')}, msg={result.get('msg')}")
+        else:
+            print("飞书通知发送成功")
+    except requests.exceptions.RequestException as e:
+        print(f"发送飞书通知网络异常: {e}")
     except Exception as e:
         print(f"发送飞书通知失败: {e}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Pytest 结果通知到飞书')
     parser.add_argument('--report', default='report.xml', help='JUnit XML 报告路径')
     parser.add_argument('--webhook', required=True, help='飞书机器人 Webhook URL')
-    parser.add_argument('--secret', required=True, help='飞书机器人签名密钥')
+    parser.add_argument('--secret', default='', help='飞书机器人签名密钥（可选）')  # ✅ 改为可选
     parser.add_argument('--report-url', default='', help='Allure 报告完整访问地址')
     args = parser.parse_args()
 
     stats = parse_junit_xml(args.report)
-    print(f"测试统计: 总数={stats['total']}, 失败={stats['failures']}, 错误={stats['errors']}, 跳过={stats['skipped']}")
+    print(f"测试统计: 总数={stats['total']}, 通过={stats['passed']}, "
+          f"失败={stats['failures']}, 错误={stats['errors']}, 跳过={stats['skipped']}")
 
-    # 修正：将 secret 作为第四个参数传入
     send_feishu_message(args.webhook, args.secret, stats, args.report_url)

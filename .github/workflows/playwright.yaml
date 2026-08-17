@@ -2,12 +2,15 @@ name: Playwright UI Tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
+
   pull_request:
-    branches: [ main, master ]
-  # ✅ 新增：定时触发（北京时间每天9点 = UTC 1点）
+    branches: [main, master]
+
   schedule:
-    - cron: '0 1 * * *'
+    - cron: '0 2 * * 1,3,5'
+      timezone: 'Asia/Shanghai'
+
   workflow_dispatch:
     inputs:
       test_scope:
@@ -19,13 +22,23 @@ on:
           - full
           - p0
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
+
     container: mcr.microsoft.com/playwright/python:v1.40.0
+
     timeout-minutes: 30
 
+    concurrency:
+      group: playwright-ui-tests-${{ github.ref }}
+      cancel-in-progress: false
+
     steps:
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -33,17 +46,20 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install allure-pytest pymysql sshtunnel paramiko
+
 
       - name: Run tests
         run: |
-          # ✅ 统一测试策略：定时任务默认跑 full，手动可选 p0
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.test_scope }}" == "p0" ]]; then
             echo "Running P0 tests..."
-            pytest -m p0 -v --junitxml=report.xml --alluredir=allure-results
+            pytest -m p0 -v \
+              --junitxml=report.xml \
+              --alluredir=allure-results
           else
             echo "Running full regression..."
-            pytest -v --junitxml=report.xml --alluredir=allure-results
+            pytest -v \
+              --junitxml=report.xml \
+              --alluredir=allure-results
           fi
         env:
           HEADLESS: true
@@ -55,29 +71,28 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
 
       - name: Generate Allure Report
-        uses: simple-elf/allure-report-action@master
         if: always()
+        uses: simple-elf/allure-report-action@master
         with:
           allure_results: allure-results
           allure_report: allure-report
 
       - name: Upload Allure Report
-        uses: actions/upload-artifact@v4
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: allure-report
           path: allure-report/
           retention-days: 7
 
-      # ✅ 先部署再通知，确保飞书中的链接是最新的
       - name: Deploy Allure report to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
         if: always()
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          personal_token: ${{ secrets.PAT_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./allure-report
-          destination_dir: .
-          keep_files: false
+          destination_dir: reports/${{ github.run_id }}
+          keep_files: true
 
       - name: Send Feishu Notification
         if: always()
@@ -86,9 +101,13 @@ jobs:
             echo "report.xml not found, skipping notification"
             exit 0
           fi
-          REPORT_URL="https://lena1784342872.github.io/lena_vibrahealth/"
-          python feishu_notifier.py --report=report.xml \
+
+          REPORT_URL="https://lena1784342872.github.io/lena_vibrahealth/reports/${{ github.run_id }}/"
+
+          python feishu_notifier.py \
+            --report=report.xml \
             --webhook="${{ secrets.FEISHU_WEBHOOK }}" \
             --secret="${{ secrets.FEISHU_SECRET }}" \
             --report-url="$REPORT_URL"
+
         shell: bash
